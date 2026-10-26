@@ -1,0 +1,137 @@
+<?xml version='1.0' encoding='utf-8'?>
+<CheatTable CheatEngineTableVersion="45">
+  <CheatEntries>
+    <CheatEntry>
+      <ID>0</ID>
+      <Description>"[CLICK] Add +9,000,000 National Treasury (one shot, repeatable)"</Description>
+      <VariableType>Auto Assembler Script</VariableType>
+      <AssemblerScript><![CDATA[[ENABLE]
+{$lua}
+if syntaxcheck then return '' end
+
+-- Citystate II: one activation = +9,000,000 to DataRegion.Treasury.
+-- This is a one-time write, NOT a freeze or a recurring timer-based money grant.
+local amount = 9000000
+local actionRecord = memrec
+
+local function automaticallyUncheck()
+  if not actionRecord then return end
+  -- Wait until Cheat Engine has finished activating this record.
+  local timer = createTimer(getMainForm(), false)
+  timer.Interval = 350
+  timer.OnTimer = function(t)
+    t.Enabled = false
+    pcall(function()
+      if actionRecord.Active then actionRecord.Active = false end
+    end)
+    t.destroy()
+  end
+  timer.Enabled = true
+end
+
+local function addNationalTreasury()
+  if not getOpenedProcessID() or getOpenedProcessID() == 0 then
+    error('Attach Cheat Engine to the running Citystate II process first.')
+  end
+  local monoOK, monoBase = pcall(LaunchMonoDataCollector)
+  if not monoOK or not monoBase or monoBase == 0 then
+    error('Mono initialization failed. Load a playable nation and try again.')
+  end
+
+  -- Confirm the real static field at runtime rather than trusting an old pointer.
+  local classId = mono_findClass('', 'DataRegion')
+  if not classId or classId == 0 then
+    error('Class DataRegion was not found. Confirm that the attached process is Citystate II.')
+  end
+  if mono_class_getName(classId) ~= 'DataRegion' then
+    error('Unexpected Mono class returned for DataRegion.')
+  end
+  local treasuryField
+  for _, f in ipairs(mono_class_enumFields(classId, true) or {}) do
+    if f.name == 'Treasury' then
+      treasuryField = f
+      break
+    end
+  end
+  if not treasuryField then
+    error('DataRegion.Treasury was not found in this game version.')
+  end
+  if not treasuryField.isStatic or treasuryField.typename ~= 'System.Int32' then
+    error('DataRegion.Treasury is no longer a static System.Int32; refusing to write.')
+  end
+
+  local fieldOffset = tonumber(treasuryField.offset)
+  if not fieldOffset or fieldOffset < 0 then
+    error('Invalid Treasury field offset; refusing to write.')
+  end
+  local domains = mono_enumDomains() or {}
+  if #domains == 0 then
+    error('No Mono domains were detected.')
+  end
+  local valid = {}
+  for _, domainId in ipairs(domains) do
+    local success, base = pcall(mono_class_getStaticFieldAddress, domainId, classId)
+    if success and type(base) == 'number' and base > 65536 then
+      local addr = base + fieldOffset
+      local okRead, old = pcall(readInteger, addr, true)
+      if okRead and type(old) == 'number' then
+        valid[#valid + 1] = {addr = addr, old = old}
+      end
+    end
+  end
+  if #valid == 0 then
+    error('Static treasury storage is unavailable. Load your nation/city, then retry.')
+  end
+  if #valid ~= 1 then
+    error('Multiple Mono domains expose the treasury field. Refusing to guess which is active.')
+  end
+
+  local target = valid[1]
+  local newValue = target.old + amount
+  if newValue > 2147483647 or newValue < -2147483648 then
+    error(string.format('Int32 overflow prevented: %d + %d exceeds supported range.', target.old, amount))
+  end
+
+  local writeOK, result = pcall(writeInteger, target.addr, newValue)
+  if not writeOK or result ~= true then
+    error('Memory write failed: ' .. tostring(result))
+  end
+  local verified = readInteger(target.addr, true)
+  if verified ~= newValue then
+    error('Verification failed after writing. The game may have updated the balance simultaneously.')
+  end
+
+  -- Optional, unfrozen live monitor; it is refreshed on every click.
+  local list = getAddressList()
+  local monitorDescription = 'National Treasury - live Int32 (current session; NOT frozen)'
+  local monitor = list.getMemoryRecordByDescription(monitorDescription)
+  if not monitor then
+    monitor = list.createMemoryRecord()
+    monitor.Description = monitorDescription
+  end
+  monitor.Address = string.format('%X', target.addr)
+  monitor.Type = vtDword
+  monitor.ShowAsSigned = true
+
+  if actionRecord then
+    actionRecord.Description = string.format('[CLICK AGAIN] +9,000,000 National Treasury   |   Last: %d -> %d', target.old, verified)
+  end
+  print(string.format('[Citystate II] Treasury +9,000,000 SUCCESS. 0x%X: %d -> %d', target.addr, target.old, verified))
+end
+
+local ok, err = pcall(addNationalTreasury)
+if not ok then
+  messageDialog('Citystate II treasury action did not complete:\n\n' .. tostring(err), mtError, mbOK)
+end
+-- The activation automatically clears itself, so the NEXT click grants another +9 million.
+automaticallyUncheck()
+return ''
+{$asm}
+[DISABLE]
+{$lua}
+return ''
+{$asm}]]></AssemblerScript>
+    </CheatEntry>
+  </CheatEntries>
+  <UserdefinedSymbols />
+</CheatTable>

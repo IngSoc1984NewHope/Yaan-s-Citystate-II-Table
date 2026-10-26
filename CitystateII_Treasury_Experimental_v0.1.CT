@@ -1,0 +1,309 @@
+<?xml version='1.0' encoding='utf-8'?>
+<CheatTable CheatEngineTableVersion="45">
+  <CheatEntries>
+    <CheatEntry>
+      <ID>0</ID>
+      <Description>"[1] Scan Mono / export treasury classes and fields (read-only)"</Description>
+      <VariableType>Auto Assembler Script</VariableType>
+      <AssemblerScript><![CDATA[[ENABLE]
+{$lua}
+if syntaxcheck then return '' end
+local function alert(s) messageDialog(s, mtInformation, mbOK) end
+if not getOpenedProcessID() or getOpenedProcessID() == 0 then
+  messageDialog('Attach Cheat Engine to the running Citystate II process first.', mtWarning, mbOK)
+  return ''
+end
+local ok, result = pcall(LaunchMonoDataCollector)
+if not ok or not result or result == 0 then
+  messageDialog('Mono initialization failed. Run the game and load your nation/city first.', mtError, mbOK)
+  return ''
+end
+local needles = {'treasur','reserve','money','cash','balance','fund','budget','financ','econ','fiscal','tax','debt','credit','nation','government','state','bank','wealth','income','capital','saving','revenue','expense','deposit'}
+local function matches(s)
+  s = string.lower(tostring(s or ''))
+  for _, w in ipairs(needles) do if string.find(s,w,1,true) then return true end end
+  return false
+end
+local numeric={
+  ['System.Int32']=vtDword,['System.UInt32']=vtDword,
+  ['System.Int64']=vtQword,['System.UInt64']=vtQword,
+  ['System.Single']=vtSingle,['System.Double']=vtDouble
+}
+local function readval(addr, ty)
+  if ty==vtDword then return readInteger(addr, true)
+  elseif ty==vtQword then return readQword(addr)
+  elseif ty==vtDouble then return readDouble(addr)
+  elseif ty==vtSingle then return readFloat(addr) end
+end
+local lines={}
+local function log(s) lines[#lines+1] = s end
+log('Citystate II / Mono discovery / no memory is modified by this operation')
+log('Important: all addresses are valid for this game session only.')
+log('Input assembly inventory contained Assembly-CSharp and Assembly-CSharp-firstpass only; field names below are runtime findings.')
+log('=== MATCHING CLASSES, FIELDS AND METHODS ===')
+local assemblies = mono_enumAssemblies() or {}
+local domains = mono_enumDomains() or {}
+local candidates = {}
+local classCount, hits = 0, 0
+for _, a in ipairs(assemblies) do
+  local img = mono_getImageFromAssembly(a)
+  local name = img and mono_image_get_name(img) or ''
+  if string.find(string.lower(name or ''),'assembly-csharp',1,true) then
+    log('### IMAGE '..tostring(name))
+    local classes = mono_image_enumClasses(img) or {}
+    for _, info in ipairs(classes) do
+      local cl = info.class
+      local cname = tostring(info.classname or '')
+      local ns = tostring(info.namespace or '')
+      local fq = (ns ~= '' and (ns..'.') or '')..cname
+      classCount=classCount+1
+      local classHit = matches(fq)
+      local details = {}
+      local fields = (cl and mono_class_enumFields(cl, true)) or {}
+      for _,f in ipairs(fields or {}) do
+        local fHit=matches(f.name)
+        if classHit or fHit then
+          local offset = tonumber(f.offset) or 0
+          details[#details+1]=string.format('  FIELD %-38s %-28s offset=0x%X %s', tostring(f.name),tostring(f.typename),offset, f.isStatic and '[STATIC]' or '[instance]')
+        end
+        local typ=numeric[tostring(f.typename)]
+        if typ and f.isStatic and fHit then
+          for di,domain in ipairs(domains) do
+            local success, base = pcall(mono_class_getStaticFieldAddress,domain,cl)
+            if success and base and base ~= 0 then
+              local addr = base+(tonumber(f.offset) or 0)
+              local good,value=pcall(readval,addr,typ)
+              if good and value ~= nil then
+                candidates[#candidates+1]={desc=string.format('%s.%s [domain %d]',fq,tostring(f.name),di), address=addr, ty=typ,value=value}
+              end
+            end
+          end
+        end
+      end
+      -- Also examine methods because treasury values may be accessed through a getter or transaction method.
+      local methods = (cl and mono_class_enumMethods(cl)) or {}
+      for _,m in ipairs(methods or {}) do
+        if classHit or matches(m.name) then
+          details[#details+1]='  METHOD '..tostring(m.name)
+        end
+      end
+      if #details>0 then
+        hits=hits+1
+        log('CLASS '..fq)
+        for _,d in ipairs(details) do log(d) end
+      end
+    end
+  end
+end
+log('=== DIRECT STATIC NUMERIC CANDIDATES ===')
+if #candidates==0 then log('None found. The treasury may be an instance field or computed value.') end
+for i,c in ipairs(candidates) do
+  log(string.format('%d: %s | addr=0x%X | vt=%d | live=%s', i,c.desc,c.address,c.ty,tostring(c.value)))
+end
+log(string.format('TOTAL class scan: %d classes, %d matching classes, %d direct static candidates', classCount,hits,#candidates))
+local outdir = os.getenv('TEMP') or '.'
+local path = outdir..'\\CitystateII_Mono_Treasury_Discovery.txt'
+local file, err=io.open(path,'w')
+if file then
+  file:write(table.concat(lines,'\n'))
+  file:close()
+else
+  path='SAVE FAILED: '..tostring(err)
+  print(table.concat(lines,'\n'))
+end
+local list=getAddressList()
+local group = list.getMemoryRecordByDescription('Mono static numeric candidates - VERIFY (current session only)')
+local shown=0
+if not group and #candidates>0 then
+  group=list.createMemoryRecord()
+  group.Description='Mono static numeric candidates - VERIFY (current session only)'
+  group.IsGroupHeader=true
+  for i,c in ipairs(candidates) do
+    if shown>=60 then break end
+    local r=list.createMemoryRecord()
+    r.Description=c.desc
+    r.Address=string.format('%X',c.address)
+    r.Type=c.ty
+    r.appendToEntry(group)
+    shown=shown+1
+  end
+end
+alert(string.format('Mono inspection complete.\nScanned classes: %d\nMatching classes: %d\nStatic numeric candidates: %d\nRecords added: %d\n\nFull report:\n%s\n\nNone of these entries is CONFIRMED to be treasury. Compare a candidate with the in-game national reserve, then verify by changing time or making a payment before using the add-money scripts.',classCount,hits,#candidates,shown,path))
+return ''
+{$asm}
+[DISABLE]
+{$lua}
+return ''
+{$asm}]]></AssemblerScript>
+    </CheatEntry>
+    <CheatEntry>
+      <ID>1</ID>
+      <Description>"CONFIRMED treasury address - EDIT THIS ADDRESS AND TYPE"</Description>
+      <VariableType>8 Bytes</VariableType>
+      <Address>0</Address>
+    </CheatEntry>
+    <CheatEntry>
+      <ID>2</ID>
+      <Description>"[2] TEST: add +1,000 to confirmed national treasury"</Description>
+      <VariableType>Auto Assembler Script</VariableType>
+      <AssemblerScript><![CDATA[[ENABLE]
+{$lua}
+if syntaxcheck then return '' end
+local delta = 1000
+local label = 'Treasury small-value test +1,000'
+local list=getAddressList()
+local target = list.getMemoryRecordByDescription('CONFIRMED treasury address - EDIT THIS ADDRESS AND TYPE')
+if not target then
+  messageDialog('The treasury target entry is missing.',mtError,mbOK)
+  return ''
+end
+if not getOpenedProcessID() or getOpenedProcessID()==0 then
+  messageDialog('Attach Cheat Engine to the running game first.',mtError,mbOK)
+  return ''
+end
+local addr=target.CurrentAddress
+if not addr or addr==0 then
+  messageDialog('Set a real, confirmed treasury ADDRESS in the table first. Address 0 is not usable.',mtWarning,mbOK)
+  return ''
+end
+local ty=target.Type
+local read,write,kind
+if ty==vtQword then
+  read=function() return readQword(addr) end
+  write=function(v) return writeQword(addr,v) end
+  kind='8 Bytes (Int64)'
+elseif ty==vtDouble then
+  read=function() return readDouble(addr) end
+  write=function(v) return writeDouble(addr,v) end
+  kind='Double'
+elseif ty==vtDword and delta<=1000 then
+  read=function() return readInteger(addr,true) end
+  write=function(v) return writeInteger(addr,v) end
+  kind='4 Bytes (test only)'
+elseif ty==vtSingle and delta<=1000 then
+  read=function() return readFloat(addr) end
+  write=function(v) return writeFloat(addr,v) end
+  kind='Float (test only)'
+else
+  messageDialog('This action requires an 8 Bytes or Double entry.\n4 Bytes and Float cannot safely store an exact +9,900,000,000.\nDo not merely re-label a 4-byte field as 8 Bytes: that would corrupt adjacent memory.',mtError,mbOK)
+  return ''
+end
+local ok, old=pcall(read)
+if not ok or old==nil or old~=old or old==math.huge or old==-math.huge then
+  messageDialog('Could not read a valid numeric value at the target address.',mtError,mbOK)
+  return ''
+end
+-- A suspiciously huge value frequently means the address contains a pointer, not a treasury balance.
+if math.abs(old)>1000000000000 then
+  messageDialog('Suspicious value (absolute amount above 1 trillion). Refusing to edit until you verify the target address.',mtWarning,mbOK)
+  return ''
+end
+local new=old+delta
+if ty==vtDword and (new>2147483647 or new< -2147483648) then
+  messageDialog('The 32-bit test amount would overflow.',mtError,mbOK)
+  return ''
+end
+local query=string.format('%s\n\nAddress: 0x%X\nType: %s\nOld value: %.0f\nIncrease: %.0f\nNew value: %.0f\n\nOnly proceed if this is the real NATIONAL treasury balance, not city cash. Apply once?',label,addr,kind,old,delta,new)
+if messageDialog(query,mtConfirmation,mbYes,mbNo)~=mrYes then return '' end
+local success, wrote=pcall(write,new)
+if not success or wrote==false then
+  messageDialog('Memory write failed.',mtError,mbOK)
+  return ''
+end
+local rOk, after=pcall(read)
+if not rOk or after==nil then
+  messageDialog('Write sent but unable to verify the new value. Check the game immediately.',mtWarning,mbOK)
+else
+  messageDialog(string.format('Write finished.\nMemory before: %.0f\nMemory after: %.0f\n\nCheck the game display and advance one budget cycle. If it resets, this was a display/cache value.',old,after),mtInformation,mbOK)
+end
+return ''
+{$asm}
+[DISABLE]
+{$lua}
+return ''
+{$asm}]]></AssemblerScript>
+    </CheatEntry>
+    <CheatEntry>
+      <ID>3</ID>
+      <Description>"[3] ADD +9,900,000,000 to confirmed national treasury"</Description>
+      <VariableType>Auto Assembler Script</VariableType>
+      <AssemblerScript><![CDATA[[ENABLE]
+{$lua}
+if syntaxcheck then return '' end
+local delta = 9900000000
+local label = 'Treasury add +9,900,000,000'
+local list=getAddressList()
+local target = list.getMemoryRecordByDescription('CONFIRMED treasury address - EDIT THIS ADDRESS AND TYPE')
+if not target then
+  messageDialog('The treasury target entry is missing.',mtError,mbOK)
+  return ''
+end
+if not getOpenedProcessID() or getOpenedProcessID()==0 then
+  messageDialog('Attach Cheat Engine to the running game first.',mtError,mbOK)
+  return ''
+end
+local addr=target.CurrentAddress
+if not addr or addr==0 then
+  messageDialog('Set a real, confirmed treasury ADDRESS in the table first. Address 0 is not usable.',mtWarning,mbOK)
+  return ''
+end
+local ty=target.Type
+local read,write,kind
+if ty==vtQword then
+  read=function() return readQword(addr) end
+  write=function(v) return writeQword(addr,v) end
+  kind='8 Bytes (Int64)'
+elseif ty==vtDouble then
+  read=function() return readDouble(addr) end
+  write=function(v) return writeDouble(addr,v) end
+  kind='Double'
+elseif ty==vtDword and delta<=1000 then
+  read=function() return readInteger(addr,true) end
+  write=function(v) return writeInteger(addr,v) end
+  kind='4 Bytes (test only)'
+elseif ty==vtSingle and delta<=1000 then
+  read=function() return readFloat(addr) end
+  write=function(v) return writeFloat(addr,v) end
+  kind='Float (test only)'
+else
+  messageDialog('This action requires an 8 Bytes or Double entry.\n4 Bytes and Float cannot safely store an exact +9,900,000,000.\nDo not merely re-label a 4-byte field as 8 Bytes: that would corrupt adjacent memory.',mtError,mbOK)
+  return ''
+end
+local ok, old=pcall(read)
+if not ok or old==nil or old~=old or old==math.huge or old==-math.huge then
+  messageDialog('Could not read a valid numeric value at the target address.',mtError,mbOK)
+  return ''
+end
+-- A suspiciously huge value frequently means the address contains a pointer, not a treasury balance.
+if math.abs(old)>1000000000000 then
+  messageDialog('Suspicious value (absolute amount above 1 trillion). Refusing to edit until you verify the target address.',mtWarning,mbOK)
+  return ''
+end
+local new=old+delta
+if ty==vtDword and (new>2147483647 or new< -2147483648) then
+  messageDialog('The 32-bit test amount would overflow.',mtError,mbOK)
+  return ''
+end
+local query=string.format('%s\n\nAddress: 0x%X\nType: %s\nOld value: %.0f\nIncrease: %.0f\nNew value: %.0f\n\nOnly proceed if this is the real NATIONAL treasury balance, not city cash. Apply once?',label,addr,kind,old,delta,new)
+if messageDialog(query,mtConfirmation,mbYes,mbNo)~=mrYes then return '' end
+local success, wrote=pcall(write,new)
+if not success or wrote==false then
+  messageDialog('Memory write failed.',mtError,mbOK)
+  return ''
+end
+local rOk, after=pcall(read)
+if not rOk or after==nil then
+  messageDialog('Write sent but unable to verify the new value. Check the game immediately.',mtWarning,mbOK)
+else
+  messageDialog(string.format('Write finished.\nMemory before: %.0f\nMemory after: %.0f\n\nCheck the game display and advance one budget cycle. If it resets, this was a display/cache value.',old,after),mtInformation,mbOK)
+end
+return ''
+{$asm}
+[DISABLE]
+{$lua}
+return ''
+{$asm}]]></AssemblerScript>
+    </CheatEntry>
+  </CheatEntries>
+  <UserdefinedSymbols/>
+</CheatTable>
